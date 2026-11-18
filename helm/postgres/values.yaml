@@ -32,12 +32,12 @@ postgresVersion: 16
 # "pgBouncerConfig". Setting "pgBouncerConfig" will override the value of
 # pgBouncerReplicas. The "RELATED_IMAGE_PGBOUNCER" in the PGO deployment must be
 # set if you want to enable this without explicitly setting "pgBouncer".
-# pgBouncerReplicas: 1
+pgBouncerReplicas: 2
 
 # monitoring enables the ability to monitor the Postgres cluster through a
 # metrics exporter that can be scraped by Prometheus. This defaults to the value
 # below.
-# monitoring: false
+monitoring: true
 
 ###################
 # Image Overrides #
@@ -51,15 +51,15 @@ postgresVersion: 16
 
 # imagePgBackRest is the pgBackRest backup utility image. This defaults to the
 # below value.
-# imagePgBackRest: registry.developers.crunchydata.com/crunchydata/crunchy-pgbackrest:ubi8-2.51-1
+imagePgBackRest: registry.developers.crunchydata.com/crunchydata/crunchy-pgbackrest:ubi8-2.51-1
 
 # imagePgBouncer is the image for the PgBouncer connection pooler. This defaults
 # to the below value.
-# imagePgBouncer: registry.developers.crunchydata.com/crunchydata/crunchy-pgbouncer:ubi8-1.22-1
+imagePgBouncer: registry.developers.crunchydata.com/crunchydata/crunchy-pgbouncer:ubi8-1.22-1
 
 # imageExporter is the image name for the exporter used as a part of monitoring.
 # This defaults to the value below.
-# imageExporter: registry.developers.crunchydata.com/crunchydata/crunchy-postgres-exporter:ubi8-0.15.0-7
+imageExporter: registry.developers.crunchydata.com/crunchydata/crunchy-postgres-exporter:ubi8-0.15.0-7
 
 ###########################
 # Basic Postgres Settings #
@@ -82,12 +82,12 @@ postgresVersion: 16
 # instanceMemory sets the memory limit for the Postgres instances. This defaults
 # to no limit being set, but an example value is set below. Settings "instances"
 # overrides this value.
-# instanceMemory: 2Gi
+instanceMemory: 2Gi
 
 # instanceCPU sets the CPU limit for the Postgres instances. This defaults to
 # no limit being set, but an example value is set below. Setting "instances"
 # overrides this value.
-# instanceCPU: 1000m
+instanceCPU: 1000m
 
 # instanceReplicas lets you set the total number of Postgres replicas. This
 # defaults to the value below. More than on replica enables high availability
@@ -108,15 +108,15 @@ postgresVersion: 16
 # For example, to set up an instance set with HA (due to the default pod
 # topology spread constraints)
 #
-# instances:
-#   - name: pgha1
-#     replicas: 2
-#     dataVolumeClaimSpec:
-#       accessModes:
-#       - "ReadWriteOnce"
-#       resources:
-#         requests:
-#           storage: 1Gi
+instances:
+  - name: pgha1
+    replicas: 2
+    dataVolumeClaimSpec:
+      accessModes:
+      - "ReadWriteOnce"
+      resources:
+        requests:
+          storage: 1Gi
 # instances: {}
 
 # port sets the port that Postgres listens on. Defaults to 5432.
@@ -297,7 +297,8 @@ postgresVersion: 16
 
 # imagePullSecrets references Secrets that credentials for pulling image from
 # private repositories
-# imagePullSecrets: []
+imagePullSecrets:
+  - name: crunchy-regcred
 
 # supplementalGroups sets any group IDs that should be assigned to
 # Pods, particularly around file system constraints within a system
