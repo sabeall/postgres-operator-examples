@@ -2,11 +2,12 @@
 # Sets up Garage (S3-compatible object store) plus a Caddy TLS proxy in front of
 # it, so pgBackRest (HTTPS-only) can use it as an S3 repo. Safe to re-run.
 #
-#   ./setup-garage-s3.sh up        install/upgrade Garage + Caddy, then verify
-#   ./setup-garage-s3.sh test      verify only (keys, bucket, S3 over HTTP + HTTPS)
-#   ./setup-garage-s3.sh secret    create the pgBackRest S3 secret for pg1
-#   ./setup-garage-s3.sh snippet   print the pg1 values.yaml snippet
-#   ./setup-garage-s3.sh down      uninstall both AND delete Garage's PVC (asks first)
+#   ./scripts/setup-garage-s3.sh up        install/upgrade Garage + Caddy, then verify
+#   ./scripts/setup-garage-s3.sh test      verify only (keys, bucket, S3 over HTTP + HTTPS)
+#   ./scripts/setup-garage-s3.sh capacity  set Garage's layout capacity (GARAGE_CAPACITY)
+#   ./scripts/setup-garage-s3.sh secret    create the pgBackRest S3 secret for pg1
+#   ./scripts/setup-garage-s3.sh snippet   print the pg1 values.yaml snippet
+#   ./scripts/setup-garage-s3.sh down      uninstall both AND delete Garage's PVC (asks first)
 #
 # Override any of these with environment variables.
 set -euo pipefail
@@ -17,6 +18,7 @@ GARAGE_RELEASE="${GARAGE_RELEASE:-objstore}"
 GARAGE_CHART="${GARAGE_CHART:-oci://ghcr.io/quenchworks/charts/garage}"
 GARAGE_VERSION="${GARAGE_VERSION:-0.0.19}"
 GARAGE_SIZE="${GARAGE_SIZE:-50G}"
+GARAGE_CAPACITY="${GARAGE_CAPACITY:-45G}"    # layout capacity; keep it below GARAGE_SIZE
 CADDY_RELEASE="${CADDY_RELEASE:-my-caddy}"
 CADDY_CHART="${CADDY_CHART:-oci://ghcr.io/quenchworks/charts/caddy}"
 CADDY_VERSION="${CADDY_VERSION:-0.0.26}"
@@ -58,6 +60,23 @@ install_garage() {
     echo "release $GARAGE_RELEASE already installed; leaving it alone"
   fi
   k rollout status "sts/${GARAGE_SVC}" --timeout=180s
+  set_capacity
+}
+
+# The chart bootstraps the layout with capacity=1G whatever the PVC size, so
+# Garage refuses writes after ~1 GB. Assigning the same value again stages
+# nothing, so this is only applied when it actually changes.
+set_capacity() {
+  local id ver
+  id=$(k exec "$GARAGE_POD" -- garage node id -q | cut -c1-16)
+  k exec "$GARAGE_POD" -- garage layout assign -z dc1 -c "$GARAGE_CAPACITY" "$id" >/dev/null
+  if k exec "$GARAGE_POD" -- garage layout show | grep -q 'STAGED ROLE CHANGES'; then
+    ver=$(k exec "$GARAGE_POD" -- garage layout show | sed -n 's/^Current cluster layout version: //p')
+    k exec "$GARAGE_POD" -- garage layout apply --version "$((ver + 1))" >/dev/null
+    echo "layout capacity set to $GARAGE_CAPACITY"
+  else
+    echo "layout capacity already $GARAGE_CAPACITY"
+  fi
 }
 
 # ------------------------------------------------------------------- caddy ---
@@ -166,17 +185,28 @@ pgBackRestConfig:
     - secret:
         name: ${PGB_SECRET}
   global:
+    repo1-retention-full: "2"
     ${REPO}-path: /pgbackrest/${NS}/${PG_CLUSTER}/${REPO}
     ${REPO}-s3-uri-style: path
     ${REPO}-storage-verify-tls: "n"
-    ${REPO}-retention-full: "7"
+    ${REPO}-retention-full: "4"
+  # Lets a backup be triggered with the pgbackrest-backup annotation.
+  manual:
+    repoName: ${REPO}
+    options:
+      - --type=full
   repos:
     - name: repo1
+      schedules:
+        full: "0 1 * * *"
       volume:
         volumeClaimSpec:
           accessModes: ["ReadWriteOnce"]
           resources: { requests: { storage: 1Gi } }
     - name: ${REPO}
+      schedules:
+        full: "0 2 * * 0"
+        differential: "0 2 * * 1-6"
       s3:
         bucket: ${BUCKET}
         endpoint: ${TLS_HOST}
@@ -184,6 +214,7 @@ pgBackRestConfig:
 
 # Check afterwards:
 #   kubectl -n ${NS} exec ${PG_CLUSTER}-repo-host-0 -c pgbackrest -- pgbackrest info
+#   ./tests/test-postgres.sh backups backup_to_s3
 EOF
 }
 
@@ -199,9 +230,10 @@ down() {
 
 case "${1:-}" in
   up)      install_garage; install_caddy; verify; snippet ;;
+  capacity) set_capacity ;;
   test)    verify ;;
   secret)  make_secret ;;
   snippet) snippet ;;
   down)    down ;;
-  *)       sed -n '2,12p' "$0"; exit 1 ;;
+  *)       sed -n '2,13p' "$0"; exit 1 ;;
 esac

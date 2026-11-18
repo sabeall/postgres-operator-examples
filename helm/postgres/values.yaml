@@ -49,17 +49,21 @@ monitoring: true
 # "postGISVersion" matches the version of PostGIS used.
 # imagePostgres: registry.developers.crunchydata.com/crunchydata/crunchy-postgres:ubi8-16.3-1
 
+# NOTE: leave these unset so the operator supplies images that match its
+# Postgres image. Pinning an older pgBackRest (e.g. 2.51 against the 2.59 in the
+# Postgres image) breaks WAL archiving and backups with a version mismatch.
+
 # imagePgBackRest is the pgBackRest backup utility image. This defaults to the
 # below value.
-imagePgBackRest: registry.developers.crunchydata.com/crunchydata/crunchy-pgbackrest:ubi8-2.51-1
+# imagePgBackRest: registry.developers.crunchydata.com/crunchydata/crunchy-pgbackrest:ubi8-2.51-1
 
 # imagePgBouncer is the image for the PgBouncer connection pooler. This defaults
 # to the below value.
-imagePgBouncer: registry.developers.crunchydata.com/crunchydata/crunchy-pgbouncer:ubi8-1.22-1
+# imagePgBouncer: registry.developers.crunchydata.com/crunchydata/crunchy-pgbouncer:ubi8-1.22-1
 
 # imageExporter is the image name for the exporter used as a part of monitoring.
 # This defaults to the value below.
-imageExporter: registry.developers.crunchydata.com/crunchydata/crunchy-postgres-exporter:ubi8-0.15.0-7
+# imageExporter: registry.developers.crunchydata.com/crunchydata/crunchy-postgres-exporter:ubi8-0.15.0-7
 
 ###########################
 # Basic Postgres Settings #
@@ -260,6 +264,43 @@ instances:
 # pgBackRestConfig allows for the configuration of every pgBackRest option
 # except for "image", which is set by "pgBackRest".
 # pgBackRestConfig: {}
+#
+# repo1: PVC in the cluster. repo2: Garage S3 (bucket my-bucket) through the
+# Caddy TLS proxy; see scripts/README.md. Credentials come from the Secret
+# pg1-pgbackrest-s3 (./scripts/setup-garage-s3.sh secret).
+pgBackRestConfig:
+  configuration:
+    - secret:
+        name: pg1-pgbackrest-s3
+  global:
+    repo1-retention-full: "2"
+    repo2-path: /pgbackrest/crunchy-postgres/pg1/repo2
+    repo2-s3-uri-style: path
+    repo2-storage-verify-tls: "n"
+    repo2-retention-full: "4"
+  # Lets a backup be triggered with the pgbackrest-backup annotation.
+  manual:
+    repoName: repo2
+    options:
+      - --type=full
+  repos:
+    - name: repo1
+      schedules:
+        full: "0 1 * * *"
+      volume:
+        volumeClaimSpec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 1Gi
+    - name: repo2
+      schedules:
+        full: "0 2 * * 0"
+        differential: "0 2 * * 1-6"
+      s3:
+        bucket: my-bucket
+        endpoint: my-caddy-caddy.crunchy-postgres.svc
+        region: garage
 
 ################################
 # Pooling / pgBouncer Settings #

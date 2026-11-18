@@ -5,9 +5,15 @@
 verifies the result. The goal is to give the `pg1` cluster an S3 backup
 repository (`repo2`) alongside its existing PVC repository (`repo1`).
 
-> **Status:** Garage, Caddy and the S3 tests (HTTP and HTTPS) are verified.
-> Pointing `pg1`'s pgBackRest at it (`secret` + `helm upgrade pg1`) has **not**
-> been run yet. See [Known issues](#known-issues).
+> **Status:** working end to end. `pg1` backs up to Garage as `repo2`. Verified
+> on 2026-11-18:
+> - full backups complete;
+> - WAL archives to both repos;
+> - `pgbackrest verify` re-reads backups from S3 with matching checksums;
+> - `pgbackrest expire` deletes old backups and WAL from the bucket.
+>
+> Re-check any time with `./tests/test-postgres.sh backups backup_to_s3`
+> (see `tests/README.md`).
 
 ## Why two components
 
@@ -71,6 +77,10 @@ versions, `PG_CLUSTER`, and `REPO`, the pgBackRest repo number).
    `data-objstore-garage-0` already exists** (see
    [Stale PVC](#stale-pvc-secret-and-garage-disagree)).
    If the release already exists it is left alone.
+   It then sets the **layout capacity** to `GARAGE_CAPACITY` (default 45G). The
+   chart bootstraps the layout with 1G whatever the PVC size, so without this
+   Garage fills up after about 1 GB. The step only applies a new layout when the
+   value changes, and can be run on its own with `capacity`.
 2. **Caddy install.**
    `helm upgrade --install my-caddy oci://ghcr.io/quenchworks/charts/caddy` with
    generated values:
@@ -125,10 +135,16 @@ Prints a `pgBackRestConfig` block for the `postgres` chart's `values.yaml`:
 
 - `configuration` references the `pg1-pgbackrest-s3` Secret.
 - `global` sets `repo2-s3-uri-style: path` (Garage needs path-style URLs),
-  `repo2-storage-verify-tls: "n"` (self-signed cert), a repo path and retention.
-- `repos` restates `repo1` (the existing PVC repo) and adds `repo2` pointing at
-  bucket `my-bucket`, endpoint `my-caddy-caddy.crunchy-postgres.svc`, region
-  `garage`.
+  `repo2-storage-verify-tls: "n"` (self-signed cert), a repo path, and retention:
+  keep 2 full backups on repo1 (a 1Gi PVC) and 4 on repo2.
+- `manual` makes repo2 the target of an annotation-triggered backup.
+- `repos` restates `repo1` (the existing PVC repo), with a daily full backup at
+  01:00. It adds `repo2` pointing at bucket `my-bucket`, endpoint
+  `my-caddy-caddy.crunchy-postgres.svc`, region `garage`. repo2 gets a weekly
+  full backup (Sunday 02:00) and a differential backup on the other days. Without
+  `schedules`, the operator takes no recurring backups at all.
+
+`helm/postgres/values.yaml` already contains this block for `pg1`.
 
 `pgBackRestConfig` **replaces** the chart's default backup block, which is why
 `repo1` has to be written out again. Paste the block into
@@ -180,6 +196,11 @@ unaffected. The script's HTTPS test therefore cleans up directly against Garage.
 This explanation is my reading of the symptoms and has not been confirmed against
 Caddy's code.
 
+**pgBackRest is not affected.** `pgbackrest expire --repo2-retention-full=1` was run
+through Caddy. It removed an expired backup and its WAL from the bucket: the object
+count dropped from 2600 to 1299, and no files were left under the removed label.
+Only the AWS CLI's single-object delete hits the problem.
+
 ### Port 3900 on your workstation
 
 If you port-forward Garage to your machine, check that the local port is free.
@@ -208,20 +229,25 @@ s3 =
 
 ## Known issues
 
-- **pgBackRest end to end is untested.** Whether the DELETE issue affects
-  pgBackRest depends on how it signs delete requests; the point to watch is
-  expiring old backups and WAL. If that fails with the same signature error,
-  replace Caddy with a proxy that forwards the client's headers unchanged, such
-  as nginx.
-- **Garage layout capacity is 1G** (`capacity=1G` in the bootstrap log), although
-  the PVC is 50G. Check the Garage chart's `config.capacity` value before storing
-  large backups, and how Garage behaves when data exceeds it.
+- **Match pgBackRest versions.** Do not pin `imagePgBackRest` (or the other
+  images) in `helm/postgres/values.yaml` unless it matches the operator's
+  Postgres image. A 2.51 pin against the 2.59 in Postgres broke WAL archiving
+  and stanza creation, for repo1 as well as repo2.
+- **Not off-site.** Garage runs in the same cluster, on `local-path` storage on
+  one node. It proves the S3 path, but it is not disaster recovery.
 - **The proxy is a single point of failure.** If Caddy is down, archiving fails
   and Postgres keeps WAL on disk until it can archive again. Fine for dev; give
   it replicas for anything serious.
 - **Self-signed certificate, verification off.** Acceptable inside the cluster.
   The chart generates it (CN `my-caddy-caddy`, issued by `my-caddy-caddy-ca`,
-  stored in Secret `my-caddy-caddy-tls`) and its lifetime is `CADDY_CERT_DAYS`.
+  stored in Secret `my-caddy-caddy-tls`).
+  - On a **fresh install** the cert lasts `CADDY_CERT_DAYS`.
+  - On an **upgrade** the chart keeps the existing Secret, so an install made
+    before this setting existed keeps its one-year cert until the Secret is
+    deleted.
+  - With verification off, pgBackRest ignores expiry, so expiry only matters if
+    verification is turned on.
+
   For real use, supply a cert via the chart's `tls.existingSecret` or
   `tls.certManager`, and turn `storage-verify-tls` back on.
 - **`up` from scratch has not been run end to end** on a clean namespace; the
