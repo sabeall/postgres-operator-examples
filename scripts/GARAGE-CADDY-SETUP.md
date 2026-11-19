@@ -50,9 +50,69 @@ Point clients at `https://my-caddy-caddy.crunchy-postgres.svc` with region
 
 `./scripts/setup-garage-s3.sh up` does all of this in one command.
 
+### Cheatsheet
+
+Day-to-day commands. `garage` commands run in the Garage pod; the rest run from
+your machine.
+
+**Get into the pod**
+
+```bash
+kubectl -n crunchy-postgres exec -it objstore-garage-0 -- sh    # shell
+kubectl -n crunchy-postgres exec objstore-garage-0 -- garage status   # one command
+kubectl -n crunchy-postgres logs objstore-garage-0              # Garage log
+```
+
+**Node and layout**
+
+```bash
+garage status                                   # node ID, health, capacity
+garage layout show                              # current layout, staged changes, next version
+garage layout assign -z dc1 -c 45G <node-id>    # stage a capacity change
+garage layout apply --version <N>               # apply it (N = current + 1)
+garage layout revert --yes                      # drop staged changes
+```
+
+**Buckets**
+
+```bash
+garage bucket list
+garage bucket info <bucket>                     # size, object count, allowed keys
+garage bucket create <bucket>
+garage bucket delete <bucket> --yes             # bucket must be empty
+```
+
+**Keys and permissions**
+
+```bash
+garage key list
+garage key create <key-name>                    # prints Key ID and secret once
+garage key info <key-name> --show-secret        # show the secret again
+garage bucket allow --read --write --owner <bucket> --key <key-name>
+garage bucket deny  --read --write --owner <bucket> --key <key-name>
+garage key delete <key-name> --yes
+```
+
+**Credentials and access from your machine**
+
+```bash
+kubectl -n crunchy-postgres get secret objstore-garage -o jsonpath='{.data.access-key}' | base64 -d; echo
+kubectl -n crunchy-postgres port-forward svc/objstore-garage 3900:3900    # S3 on localhost:3900
+```
+
+**Helper script**
+
+```bash
+./scripts/setup-garage-s3.sh up          # install / repair everything
+./scripts/setup-garage-s3.sh test        # verify; changes nothing
+./scripts/setup-garage-s3.sh capacity    # set layout capacity only
+./scripts/setup-garage-s3.sh down        # uninstall and delete data (asks first)
+```
+
 ## Contents
 
 - [TL;DR](#tldr)
+  - [Cheatsheet](#cheatsheet)
 - [What Garage is](#what-garage-is)
 - [This setup](#this-setup)
   - [Do you need Caddy?](#do-you-need-caddy)
@@ -580,9 +640,11 @@ deletes through Caddy are not affected.
 
 ### `No such key` from your workstation
 
-Check that your local port-forward points at this Garage: the `clickhouse` and
-`demo1` namespaces run other Garages. Use a free local port, for example
-`kubectl -n crunchy-postgres port-forward svc/objstore-garage 13900:3900`.
+Check that your port-forward on `localhost:3900` points at this Garage
+(`crunchy-postgres/objstore-garage`): the `clickhouse` and `demo1` namespaces run
+other Garages, and their keys don't match. In k9s, `:pf` shows each forward's
+target. Stop any forward to another Garage, then run
+`kubectl -n crunchy-postgres port-forward svc/objstore-garage 3900:3900`.
 
 ## Advanced: replicating across clusters (COOP)
 

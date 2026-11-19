@@ -226,11 +226,12 @@ Only the AWS CLI's single-object delete hits the problem.
 
 ### Port 3900 on your workstation
 
-If you port-forward Garage to your machine, check that the local port is free.
-A `k9s` port-forward on `localhost:3900` was pointing at a different Garage
-(there are others in the `clickhouse` and `demo1` namespaces), which produced
-`No such key` errors that looked like bad credentials. Use another local port,
-for example `kubectl -n crunchy-postgres port-forward svc/objstore-garage 13900:3900`.
+Forward this Garage to `localhost:3900`:
+`kubectl -n crunchy-postgres port-forward svc/objstore-garage 3900:3900`.
+Check that the forward points at `crunchy-postgres/objstore-garage` (in k9s,
+`:pf` shows each forward's target). Other Garages run in the `clickhouse` and
+`demo1` namespaces, and a forward to one of them produces `No such key` errors
+that look like bad credentials.
 
 ## AWS CLI from your workstation
 
@@ -242,7 +243,7 @@ endpoint. Garage uses region `garage` and path-style addressing:
 [default]
 output = table
 region = garage
-endpoint_url = http://localhost:13900
+endpoint_url = http://localhost:3900
 s3 =
     addressing_style = path
 ```
