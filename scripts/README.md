@@ -15,17 +15,40 @@ repository (`repo2`) alongside its existing PVC repository (`repo1`).
 > Re-check any time with `./tests/test-postgres.sh backups backup_to_s3`
 > (see `tests/README.md`).
 
-## Why two components
+To set up Garage and Caddy by hand, without the script and without any Postgres
+steps, see [GARAGE-CADDY-SETUP.md](GARAGE-CADDY-SETUP.md).
 
+## How backups flow
+
+```text
+  WAL archiving (continuous)
+
+    Primary ── archive-push ──┬──▶ Repo host pg1-repo-host-0 ──▶ repo1  PVC 1Gi
+                              │
+                              └──▶ Caddy :443 ──▶ Garage :3900 ──▶ repo2  bucket my-bucket
+                                   HTTPS,         HTTP
+                                   verify off
+
+  Backups (on schedule)
+
+    CronJob ── start ──▶ Repo host ◀── data files ── Primary
+                             │
+                             ├──▶ repo1                       pg1-repo1-full: daily full
+                             │
+                             └──▶ Caddy ──▶ Garage ──▶ repo2  pg1-repo2-full: weekly full
+                                                              pg1-repo2-diff: daily differential
+
+  S3 keys:  Secret pg1-pgbackrest-s3 (repo2-s3-key, repo2-s3-key-secret),
+            added to the pgBackRest config on the primary and the repo host.
+  Replica:  streams WAL from the primary; it does not archive.
 ```
- pgBackRest (in pg1 pods)
-        |  HTTPS :443  (self-signed cert, verification off)
-        v
- Caddy  (release my-caddy, svc my-caddy-caddy)
-        |  HTTP :3900
-        v
- Garage (release objstore, svc objstore-garage, PVC data-objstore-garage-0)
-```
+
+- **WAL goes to both repos.** Every WAL segment is archived to repo1 and to repo2.
+- **Backups follow the schedules in `values.yaml`.** repo1 gets a daily full
+  backup. repo2 gets a weekly full backup and a differential on the other days.
+- **A restore can use either repo.**
+
+## Why two components
 
 - **Garage** serves the S3 API over plain HTTP only. It has no TLS support and
   expects a reverse proxy for HTTPS.

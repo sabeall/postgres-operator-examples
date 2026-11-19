@@ -29,6 +29,28 @@ any directory. It prints what it checked and ends with `PASS:`, `FAIL:` or
 ./tests/test-postgres.sh --junit report.xml     # also write a JUnit XML report
 ```
 
+```text
+  test-postgres.sh [names] [--junit FILE]
+     │
+     ▼
+  find tests/postgres/NN-*.sh   (all, or only the named ones)
+     │
+     ▼
+  ┌─ for each test, in NN order ─────────────────────────────────────────┐
+  │ bash NN-name.sh in its own process, under a timeout                  │
+  │ (its "# timeout:" header, or TEST_TIMEOUT)                           │
+  │    │                                                                 │
+  │    ├─ exit 0 ────────────────────▶ --- PASS                          │
+  │    ├─ exit 77 ───────────────────▶ --- SKIP                          │
+  │    └─ exit 1, 124 (timed out), ──▶ --- FAIL                          │
+  │       or anything else              + ::error under GitHub Actions   │
+  └──┬───────────────────────────────────────────────────────────────────┘
+     │  after the last test
+     ▼
+  summary table, plus a JUnit XML file with --junit
+  exit 1 if any test failed, otherwise 0
+```
+
 The runner executes each script in a separate process with a timeout. It prints
 the script's output under `=== RUN` and then `--- PASS`, `--- FAIL` or
 `--- SKIP`, and a summary table at the end. A failure never changes another
@@ -80,6 +102,31 @@ KEEP=1 ./tests/test-instance.sh run               # leave it running afterwards 
 ./tests/test-instance.sh up                       # only create it (and wait for ready)
 ./tests/test-instance.sh status                   # show its cluster, pods and PVCs
 ./tests/test-instance.sh down                     # delete it
+```
+
+```text
+  test-instance.sh run [args]
+   │
+   ├─ up
+   │   1  create namespace pg-test and label it as made by this script
+   │   2  copy Secrets:  crunchy-regcred
+   │                     pg1-pgbackrest-s3 ─▶ pgtest-pgbackrest-s3
+   │   3  helm install pgtest   (values.yaml + test overrides;
+   │                             bucket, endpoint, region read from pg1)
+   │        └─▶ the operator creates instances, pgBouncer, repo host, PVCs,
+   │            stanzas on repo1 and repo2, and an initial backup to repo1
+   │            (repo2 path: /pgbackrest/pg-test/pgtest/repo2)
+   │   4  every 5s, up to READY_TIMEOUT: wait until instances and pgBouncer
+   │      are ready, both stanzas exist, and the initial backup is done
+   │
+   ├─ tests
+   │   5  test-postgres.sh [args] with NS=pg-test CLUSTER=pgtest
+   │
+   ├─ down   (skipped with KEEP=1)
+   │   6  helm uninstall, then delete the namespace (only if it has the label)
+   │   7  aws s3 rm --recursive s3://<bucket>/pgbackrest/pg-test/pgtest/
+   │
+   └─ exit with the tests' exit code
 ```
 
 `up` does the following:
