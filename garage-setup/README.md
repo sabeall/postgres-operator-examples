@@ -251,6 +251,170 @@ s3 =
 `~/.aws/credentials` takes the `access-key` / `secret-key` values from the
 `objstore-garage` Secret.
 
+## Other databases: ClickHouse and MariaDB
+
+The same Garage can hold backups for other databases. Both clients below accept
+plain HTTP, so they talk to Garage directly on port 3900 and **Caddy is not
+needed**.
+
+| Setting | Value |
+|---|---|
+| Endpoint | `http://objstore-garage.crunchy-postgres.svc:3900` (full DNS name, because the clients run in other namespaces) |
+| Region | `garage` |
+| Addressing | path-style |
+| Bucket and key | one per application (below) |
+
+### Give each application its own bucket and key
+
+Don't reuse the `objstore-garage` admin key. A separate key limited to one bucket
+means a compromised or misconfigured client can't touch the Postgres backups.
+In the Garage pod (`kubectl -n crunchy-postgres exec -it objstore-garage-0 -- sh`):
+
+```bash
+garage bucket create clickhouse-backups
+garage key create clickhouse-backups-key        # prints the Key ID and Secret key
+garage bucket allow --read --write --owner clickhouse-backups --key clickhouse-backups-key
+
+garage bucket create mariadb-backups
+garage key create mariadb-backups-key
+garage bucket allow --read --write --owner mariadb-backups --key mariadb-backups-key
+```
+
+Secrets can't be read across namespaces, so store each key **in the namespace of
+the database that uses it** (leading space keeps it out of shell history):
+
+```bash
+ kubectl -n clickhouse create secret generic garage-s3 \
+   --from-literal=access-key-id=GK... --from-literal=secret-access-key=...
+ kubectl -n <mariadb-namespace> create secret generic garage-s3 \
+   --from-literal=access-key-id=GK... --from-literal=secret-access-key=...
+```
+
+### Altinity ClickHouse (clickhouse-backup sidecar)
+
+The Altinity operator doesn't back up by itself. The usual approach, and the one
+`ch1` in the `clickhouse` namespace already uses, is Altinity's
+[clickhouse-backup](https://github.com/Altinity/clickhouse-backup) as a sidecar
+in the ClickHouseInstallation's pod template. It is configured entirely through
+environment variables. Add or change the sidecar in the CHI:
+
+```yaml
+spec:
+  templates:
+    podTemplates:
+      - name: main-pod-template
+        spec:
+          containers:
+            - name: clickhouse
+              image: clickhouse/clickhouse-server:25.8
+            - name: clickhouse-backup
+              image: altinity/clickhouse-backup:2.7.2
+              command: ["bash", "-xc", "/bin/clickhouse-backup server"]
+              env:
+                - { name: API_LISTEN, value: "0.0.0.0:7171" }
+                - { name: API_CREATE_INTEGRATION_TABLES, value: "true" }
+                - { name: REMOTE_STORAGE, value: s3 }
+                - { name: BACKUPS_TO_KEEP_REMOTE, value: "7" }
+                - { name: S3_ENDPOINT, value: "http://objstore-garage.crunchy-postgres.svc:3900" }
+                - { name: S3_REGION, value: garage }
+                - { name: S3_FORCE_PATH_STYLE, value: "true" }
+                - { name: S3_BUCKET, value: clickhouse-backups }
+                - { name: S3_PATH, value: "ch1/{shard}" }     # one folder per shard
+                - name: S3_ACCESS_KEY
+                  valueFrom: { secretKeyRef: { name: garage-s3, key: access-key-id } }
+                - name: S3_SECRET_KEY
+                  valueFrom: { secretKeyRef: { name: garage-s3, key: secret-access-key } }
+                - { name: CLICKHOUSE_USERNAME, value: admin }
+                - name: CLICKHOUSE_PASSWORD
+                  valueFrom: { secretKeyRef: { name: ch1-clickhouse-installation-admin, key: admin } }
+```
+
+Applying the CHI restarts the ClickHouse pods one at a time.
+
+**Take and check a backup.** Run it on one replica per shard; replicated tables
+hold the same data on every replica:
+
+```bash
+P="kubectl -n clickhouse exec chi-ch1-clickhouse-installation-main-0-0-0 -c clickhouse-backup --"
+$P clickhouse-backup create_remote          # backup named by timestamp, uploaded to Garage
+$P clickhouse-backup list remote
+```
+
+**Restore:** `clickhouse-backup restore_remote <backup-name>` in the same
+container. Add `--rm` to drop the existing tables first.
+
+**Schedule it.** `clickhouse-backup` has no scheduler of its own. With
+`API_CREATE_INTEGRATION_TABLES`, a backup can be started from SQL, so a
+Kubernetes CronJob (or `ch1`'s existing `cron-sidecar`) can run:
+
+```sql
+INSERT INTO system.backup_actions(command) VALUES ('create_remote')
+```
+
+**Tables on an S3 disk.** `ch1` stores table data on an `s3_disk` in its own
+Garage. clickhouse-backup copies that data too, but it needs the object disk to
+be reachable and can take much longer than a local-disk backup. Check
+`clickhouse-backup`'s `object_disks` notes before relying on it.
+
+### MariaDB (mariadb-operator)
+
+[mariadb-operator](https://github.com/mariadb-operator/mariadb-operator) has S3
+storage built in. A `Backup` resource runs `mariadb-dump` on a schedule and
+uploads the result:
+
+```yaml
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: Backup
+metadata:
+  name: mariadb-backup
+  namespace: <mariadb-namespace>
+spec:
+  mariaDbRef:
+    name: mariadb                     # your MariaDB resource
+  schedule:
+    cron: "0 3 * * *"
+  maxRetention: 168h                  # keep 7 days
+  compression: gzip
+  storage:
+    s3:
+      bucket: mariadb-backups
+      prefix: mariadb
+      endpoint: objstore-garage.crunchy-postgres.svc:3900   # host:port, no http://
+      region: garage
+      tls:
+        enabled: false                # plain HTTP to Garage
+      accessKeyIdSecretKeyRef:
+        name: garage-s3
+        key: access-key-id
+      secretAccessKeySecretKeyRef:
+        name: garage-s3
+        key: secret-access-key
+```
+
+- **The endpoint has no scheme.** `tls.enabled` decides between HTTP and HTTPS.
+- **Path-style is automatic.** The operator's S3 client uses path-style for any
+  endpoint that isn't AWS, so there is no setting for it.
+- **Check it:** `kubectl -n <mariadb-namespace> get backups`, the logs of the Job
+  it creates, and `s3cmd ls -r s3://mariadb-backups/mariadb/`.
+
+**Restore** with a `Restore` resource that has the same `s3` block, or create a
+new MariaDB from a backup with `spec.bootstrapFrom.s3`. Both accept
+`targetRecoveryTime` to pick the backup closest to a point in time.
+
+### Status of these instructions
+
+Neither setup has been run against this Garage yet:
+
+- **ClickHouse** follows the sidecar config `ch1` already runs against its own
+  Garage (`http://ch1-garage:3900`), with only the endpoint, bucket and Secret
+  changed.
+- **MariaDB:** mariadb-operator is not installed in this cluster. The `Backup`
+  resource follows the operator's documented S3 options; check them against the
+  operator version you install.
+
+`./garage-report.py` lists the new buckets and their largest prefixes. It only
+parses pgBackRest repos, so it won't count ClickHouse or MariaDB backups.
+
 ## Known issues
 
 - **Match pgBackRest versions.** Do not pin `imagePgBackRest` (or the other
