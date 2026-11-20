@@ -4,6 +4,7 @@
 #
 #   ./scripts/setup-garage-s3.sh up        install/upgrade Garage + Caddy, then verify
 #   ./scripts/setup-garage-s3.sh test      verify only (keys, bucket, S3 over HTTP + HTTPS)
+#   ./scripts/setup-garage-s3.sh ls [pfx]  list every object in the bucket (optionally under a prefix)
 #   ./scripts/setup-garage-s3.sh capacity  set Garage's layout capacity (GARAGE_CAPACITY)
 #   ./scripts/setup-garage-s3.sh secret    create the pgBackRest S3 secret for pg1
 #   ./scripts/setup-garage-s3.sh snippet   print the pg1 values.yaml snippet
@@ -162,6 +163,16 @@ verify() {
     aws \$D s3 rm s3://${BUCKET}/_setup_test_tls >/dev/null && echo 'ok: cleanup (direct)'"
 }
 
+# Lists objects with sizes and a total. Goes direct to Garage over HTTP, so it
+# works without Caddy.
+list_objects() { # $1 = optional key prefix, e.g. pgbackrest/crunchy-postgres/pg1/repo2/backup
+  local prefix="${1:-}"
+  case "$prefix" in *\'*) die "prefix must not contain a single quote" ;; esac
+  log "Objects in s3://${BUCKET}/${prefix}"
+  aws_pod "aws --endpoint-url http://${GARAGE_SVC}:3900 --region garage \
+    s3 ls 's3://${BUCKET}/${prefix}' --recursive --human-readable --summarize"
+}
+
 # --------------------------------------------------------------- pgbackrest ---
 make_secret() {
   log "pgBackRest S3 secret ${PGB_SECRET}"
@@ -232,8 +243,9 @@ case "${1:-}" in
   up)      install_garage; install_caddy; verify; snippet ;;
   capacity) set_capacity ;;
   test)    verify ;;
+  ls)      list_objects "${2:-}" ;;
   secret)  make_secret ;;
   snippet) snippet ;;
   down)    down ;;
-  *)       sed -n '2,13p' "$0"; exit 1 ;;
+  *)       sed -n '2,14p' "$0"; exit 1 ;;
 esac
